@@ -1,6 +1,9 @@
 fastapi[all]
 uvicorn[standard]
 geopandas
+pyarrow
+numpy
+pydantic
 networkx
 shapely
 tqdm
