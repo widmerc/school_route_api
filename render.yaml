@@ -1,11 +1,8 @@
 services:
   - type: web
     name: school_route_api
-    env: docker
+    env: python
     plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
     autoDeploy: true
-    # Dockerfile in the repo will be used for build/start. No buildCommand/startCommand needed.
-    # If you prefer a plain Python service (no Docker), change `env: docker` -> `env: python`
-    # and uncomment the lines below instead of using the Dockerfile:
-    # buildCommand: pip install -r requirements.txt
-    # startCommand: gunicorn -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:$PORT
