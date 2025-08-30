@@ -47,6 +47,18 @@ Notes
 Contact
 - For deployment help or modifications (e.g., transform output to EPSG:4326), open an issue or request a patch.
 
+QGIS Integration
+
+An example QGIS Processing script `qgis_processing_load_route.py` is included in this repository. The script lets you pick a start and end point (via the Processing dialog), calls the routing API, and loads the returned GeoJSON route directly into the current QGIS project.
+
+Quick start (QGIS)
+1. Open QGIS → Processing Toolbox → Scripts → Create new script, or copy `qgis_processing_load_route.py` into your QGIS scripts folder.
+2. Locate the script under Routing → "Load route from routing API" and run it.
+3. In the dialog choose the Start and End points (or type coordinates), optionally change the API URL (default: `https://school-route-api.onrender.com/route`) and `k`, then run.
+4. The script writes a temporary GeoJSON file and adds it as a vector layer to the project. Make sure the layer CRS matches your `edges_with_safety.parquet` CRS (e.g. EPSG:2056) if QGIS does not detect it automatically.
+
+Note: The script is built for interactive use (point selection). If you prefer using existing point layers as input, the script can be extended — tell me and I will add that option.
+
 
 
 # Deploy FastAPI on Render

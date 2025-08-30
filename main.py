@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.responses import Response
 from pydantic import BaseModel
 from shapely.geometry import Point, mapping
 from shapely.ops import linemerge
@@ -53,3 +54,15 @@ def compute_route(req: RouteRequest):
             }
         })
     return {"type": "FeatureCollection", "features": features}
+
+
+# Simple root/info endpoint so GET / doesn't return 404
+@app.get("/")
+def root():
+    return {"service": "school_route_api", "endpoints": ["POST /route"]}
+
+
+# Reply to favicon requests with no content to avoid 404 noise
+@app.get("/favicon.ico")
+def favicon():
+    return Response(status_code=204)
