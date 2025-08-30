@@ -5,3 +5,4 @@ networkx
 shapely
 tqdm
 joblib
+scipy
