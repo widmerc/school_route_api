@@ -3,6 +3,7 @@ uvicorn[standard]
 geopandas
 pyarrow
 numpy
+pandas
 pydantic
 networkx
 shapely

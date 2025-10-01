@@ -1,4 +1,4 @@
-import os, itertools as it
+import itertools as it
 import numpy as np
 import networkx as nx
 import geopandas as gpd
@@ -6,40 +6,36 @@ import geopandas as gpd
 from shapely.geometry import LineString, Point
 from shapely.ops import linemerge
 from scipy.spatial import cKDTree
-from tqdm.auto import tqdm
-from joblib import Parallel, delayed
 
 # -------------------------------------------------------
-# Helpers: endpoints & edge cost
+# Helpers: Endpunkte & Kosten
 # -------------------------------------------------------
 def _endpoints(line: LineString):
-    """Return (x,y) start/end tuples, rounded for stable node keys."""
+    """Runde Koordinaten der Linienendpunkte, damit sie stabile Node-Keys sind."""
     a, b = line.coords[0], line.coords[-1]
     return (round(a[0], 6), round(a[1], 6)), (round(b[0], 6), round(b[1], 6))
 
 def _edge_cost(length, safety, alpha=1.0, beta=1.0):
     """
-    cost_e = alpha * length_m + beta * (100 - S_e) * (length_m / 100)
-    S_e in [0,100], higher is safer.
+    Kostenfunktion:
+    cost = alpha * length + beta * (100 - safety) * (length/100)
+    Je höher safety, desto günstiger.
     """
-    length = float(length); safety = float(safety)
+    length = float(length)
+    safety = float(safety)
     return alpha * length + beta * (100.0 - safety) * (length / 100.0)
 
 # -------------------------------------------------------
-# Build Graph (collapse parallels)
+# Graph aufbauen
 # -------------------------------------------------------
 def build_graph_simple(gdf, alpha=1.0, beta=1.0):
     """
-    Build a simple undirected graph:
-    - nodes = segment endpoints
-    - edges = road segments
-    - collapse parallels by min cost (tie -> lower safety)
+    Baue einen ungerichteten Graphen:
+    - Nodes = Linienendpunkte
+    - Edges = Liniensegmente
+    - Parallelen werden auf das beste Segment reduziert
     """
     G = nx.Graph()
-    need = [c for c in ("length_m", "safety_score") if c not in gdf.columns]
-    if need:
-        raise ValueError(f"Missing columns for routing: {need}")
-
     for _, row in gdf.iterrows():
         geom = row.geometry
         if not isinstance(geom, LineString) or geom.is_empty:
@@ -50,14 +46,15 @@ def build_graph_simple(gdf, alpha=1.0, beta=1.0):
         safety = float(row["safety_score"])
         cost   = _edge_cost(length, safety, alpha, beta)
 
-        if u not in G: G.add_node(u, x=u[0], y=u[1])
-        if v not in G: G.add_node(v, x=v[0], y=v[1])
+        if u not in G:
+            G.add_node(u, x=u[0], y=u[1])
+        if v not in G:
+            G.add_node(v, x=v[0], y=v[1])
 
         attrs = dict(
             fid=row.get("fid"),
             length_m=length,
             safety_score=safety,
-            prob_unsafe=float(row.get("prob_unsafe", np.nan)),
             cost=cost,
             geom=geom
         )
@@ -72,11 +69,10 @@ def build_graph_simple(gdf, alpha=1.0, beta=1.0):
         else:
             G.add_edge(u, v, **attrs)
 
-    print(f"[Graph built] {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
     return G
 
 # -------------------------------------------------------
-# NodeLocator (snap point to nearest node)
+# NodeLocator: Snap auf nächste Node
 # -------------------------------------------------------
 class NodeLocator:
     def __init__(self, G):
@@ -89,30 +85,18 @@ class NodeLocator:
         return self.nodes[int(idx)]
 
 # -------------------------------------------------------
-# Compact edge map for multiprocessing
+# Edge-Map & Pfad-Zusammenfassung
 # -------------------------------------------------------
 def _make_edge_map(G):
-    """Create lightweight dict so workers don’t need the whole Graph."""
+    """Leichtgewichtige Kanten-Dict (für Summaries)."""
     def key(u, v): return (u, v) if u <= v else (v, u)
-    emap = {}
-    for u, v, data in G.edges(data=True):
-        emap[key(u, v)] = {
-            "length_m": data["length_m"],
-            "cost": data["cost"],
-            "safety_score": data["safety_score"],
-            "fid": data.get("fid"),
-            "geom": data.get("geom"),
-        }
-    return emap
+    return {key(u, v): dict(data) for u, v, data in G.edges(data=True)}
 
-# -------------------------------------------------------
-# Summarize one path
-# -------------------------------------------------------
 def _summarize_path_from_map(path, emap):
+    """Summarisiere einen Pfad (Länge, Kosten, Safety etc.)."""
     def key(u, v): return (u, v) if u <= v else (v, u)
-    total_len = 0.0
-    total_cost = 0.0
-    min_safety = float("inf")
+
+    total_len, total_cost, min_safety = 0.0, 0.0, float("inf")
     worst_edge = None
     edges = []
 
@@ -122,7 +106,8 @@ def _summarize_path_from_map(path, emap):
         total_len  += d["length_m"]
         total_cost += d["cost"]
         if d["safety_score"] < min_safety:
-            min_safety = d["safety_score"]; worst_edge = d.get("fid")
+            min_safety = d["safety_score"]
+            worst_edge = d.get("fid")
 
     lw_mean = (sum(e["safety_score"] * e["length_m"] for e in edges) /
                max(total_len, 1e-9))
@@ -138,27 +123,43 @@ def _summarize_path_from_map(path, emap):
     )
 
 # -------------------------------------------------------
-# k shortest alternatives (with tqdm + parallel summary)
+# GeoDataFrame-Helfer
 # -------------------------------------------------------
-def k_routes_mp(G, src_pt: Point, dst_pt: Point,
-                k=10, n_jobs=1, backend="threading", show_progress=True):
+def make_routes_gdf(paths, crs, extra=None):
+    """Wandle berechnete Pfade in ein GeoDataFrame um."""
+    feats = []
+    for i, p in enumerate(paths, 1):
+        geoms = [e["geom"] for e in p["edges"] if e.get("geom") is not None]
+        if not geoms:
+            continue
+        route_geom = linemerge(geoms)
+        rec = {
+            "alt": i,
+            "total_length_m": p["total_length_m"],
+            "total_cost": p["total_cost"],
+            "safety_mean": p["safety_mean_lenweighted"],
+            "safety_min": p["safety_min_edge"],
+            "worst_edge_fid": p.get("worst_edge_fid"),
+            "geometry": route_geom
+        }
+        if extra:
+            rec.update(extra)
+        feats.append(rec)
+    return gpd.GeoDataFrame(feats, geometry="geometry", crs=crs)
+
+# -------------------------------------------------------
+# K-Routen (Shortest Alternatives)
+# -------------------------------------------------------
+def k_routes_mp(G, src_pt: Point, dst_pt: Point, k=1):
     """
-    Compute k shortest paths between two points.
-    Uses NetworkX shortest_simple_paths (sequential) + parallel summary.
+    Berechne k kürzeste Pfade zwischen zwei Punkten.
+    Nutzt NetworkX shortest_simple_paths.
     """
     locator = NodeLocator(G)
     s, t = locator.nearest(src_pt), locator.nearest(dst_pt)
 
-    # 1) Collect paths
     gen = nx.shortest_simple_paths(G, s, t, weight="cost")
-    paths = ([p for p in tqdm(it.islice(gen, k), total=k, desc="Collect paths")]
-             if show_progress else list(it.islice(gen, k)))
-
-    # 2) Summarize in parallel
+    paths = list(it.islice(gen, k))
     emap = _make_edge_map(G)
-    iterator = (delayed(_summarize_path_from_map)(p, emap) for p in paths)
-    if show_progress:
-        iterator = tqdm(iterator, total=len(paths), desc="Summarize paths")
 
-    summaries = Parallel(n_jobs=n_jobs, backend=backend)(iterator)
-    return summaries
+    return [_summarize_path_from_map(p, emap) for p in paths]
