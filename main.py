@@ -1,5 +1,5 @@
 # ==========================================================
-# School Route Routing API (Optimized + Cached + Single/Multiple Cases)
+# School Route Routing API (Optimized + Cached + Cron support)
 # ==========================================================
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -8,8 +8,9 @@ from shapely.ops import linemerge
 import geopandas as gpd
 import networkx as nx
 from routing_helpers import build_graph_simple, NodeLocator, _edge_cost, _make_edge_map, _summarize_path_from_map
+from datetime import datetime
 
-app = FastAPI(title="School Route API (Cached + Flexible αβ)")
+app = FastAPI(title="School Route API (Cached + Cron support)")
 
 # ----------------------------------------------------------
 # Request model
@@ -109,10 +110,10 @@ def load_networks():
     print("✅ Networks preloaded and cached.")
 
 # ----------------------------------------------------------
-# Main endpoint
+# Main routing endpoint
 # ----------------------------------------------------------
 @app.post("/route_cases")
-def route_cases(req: RouteRequest):
+def route_cases(req: RouteRequest, quiet: bool = False):
     model = req.model.lower()
     if model not in ["ml", "rule-based", "rule_based"]:
         raise HTTPException(status_code=400, detail="Model must be 'ml' or 'rule-based'.")
@@ -128,6 +129,8 @@ def route_cases(req: RouteRequest):
     if req.alpha is not None and req.beta is not None:
         update_edge_costs(G, req.alpha, req.beta)
         summary = shortest_route(G, locator, emap, start_pt, end_pt)
+        if quiet:
+            return {"status": "ok", "alpha": req.alpha, "beta": req.beta}
         feat = route_to_feature(summary, f"Custom α={req.alpha}, β={req.beta}", req.alpha, req.beta)
         return {
             "type": "FeatureCollection",
@@ -144,18 +147,51 @@ def route_cases(req: RouteRequest):
         if feat:
             features.append(feat)
 
+    if quiet:
+        return {"status": "ok", "routes_computed": len(features)}
+
     return {
         "type": "FeatureCollection",
         "crs": {"type": "name", "properties": {"name": str(network_crs)}},
         "features": features,
     }
 
+# ----------------------------------------------------------
+# Cron endpoint (GET + POST) — for cron-job.org
+# ----------------------------------------------------------
+@app.post("/cron_run")
+@app.get("/cron_run")
+def cron_run():
+    """Lightweight endpoint for cron-job.org — triggers route computation silently."""
+    print(f"📅 CRON Trigger at {datetime.now().isoformat()} (model=ml, α=1, β=1)")
+    try:
+        # Example coordinates (LV95)
+        start = Point(2682135.2, 1248219.2)
+        end = Point(2682433.4, 1246621.1)
+
+        update_edge_costs(G_ml, 1.0, 1.0)
+        summary = shortest_route(G_ml, locator_ml, emap_ml, start, end)
+        print(f"✅ CRON route computed, length={summary['total_length_m']:.1f} m")
+
+        return {
+            "status": "ok",
+            "timestamp": datetime.now().isoformat(),
+            "length_m": summary["total_length_m"]
+        }
+    except Exception as e:
+        print(f"❌ CRON error: {e}")
+        return {"status": "error", "error": str(e)}
+
+# ----------------------------------------------------------
+# Root
+# ----------------------------------------------------------
 @app.get("/")
 def root():
     return {
         "service": "school_route_api_cached",
         "description": "Compute 1 or 4 school routes depending on α/β presence",
-        "expected_fields": ["start", "end", "model", "alpha", "beta"],
+        "cron_endpoint": "/cron_run (for scheduled tasks, GET or POST)",
+        "example_cron_url": "https://school-route-api.onrender.com/cron_run",
         "models": ["ml", "rule-based"],
         "endpoint": "/route_cases",
     }
